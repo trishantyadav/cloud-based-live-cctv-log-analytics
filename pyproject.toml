@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cctv-log-rag"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.8,<3", "python-dotenv>=1.0,<2", "tzdata>=2024.1"]
+
+[tool.setuptools]
+packages = ["cctv_rag"]
+package-dir = {cctv_rag = "."}
+
+[tool.setuptools.package-data]
+cctv_rag = ["sample_data/*.json", "database/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
