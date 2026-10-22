@@ -4,6 +4,7 @@ from pathlib import Path
 import streamlit as st
 from cctv_rag.runtime import Runtime
 from cctv_rag.query_parser import Clarification
+from cctv_rag.analytics import vehicle_analytics_overview
 
 
 def main():
@@ -36,6 +37,95 @@ def main():
                         st.error('Invalid JSON input or batch ID.')
         st.subheader('Ingestion status')
         st.json(runtime.status())
+
+        st.subheader('Vehicle Traffic & Directional Analytics')
+        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
+        with col_ctrl1:
+            cam_filter = st.text_input('Camera filter (e.g. CAM_01)', '', key='analytics_cam')
+        with col_ctrl2:
+            src_filter = st.selectbox('Data source', ['all', 'live', 'synthetic'], key='analytics_src')
+        with col_ctrl3:
+            time_filter = st.checkbox('Filter by UTC time window', value=False, key='analytics_time_enable')
+
+        start_utc, end_utc = None, None
+        if time_filter:
+            t_col1, t_col2 = st.columns(2)
+            with t_col1:
+                start_utc = st.text_input('Window start (UTC ISO)', '2026-10-09T00:00:00Z', key='analytics_start')
+            with t_col2:
+                end_utc = st.text_input('Window end (UTC ISO)', '2026-10-12T00:00:00Z', key='analytics_end')
+
+        overview = vehicle_analytics_overview(
+            runtime.store,
+            start=start_utc if time_filter else None,
+            end=end_utc if time_filter else None,
+            camera=cam_filter.strip() or None,
+            source=None if src_filter == 'all' else src_filter
+        )
+
+        if overview['valid_records'] == 0:
+            st.info('No events match the selected filters. Ingest CCTV batches or adjust the camera, source, or time filters.')
+        else:
+            if overview['is_mixed_source']:
+                st.warning('⚠️ Showing mixed data: contains both live and synthetic events. Synthetic data is test data.')
+            elif 'live' in overview['source_types']:
+                st.success('🟢 Source: Live CCTV observations only.')
+            elif 'synthetic' in overview['source_types']:
+                st.info('🧪 Source: Synthetic test data only.')
+
+            m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
+            m_col1.metric('Total Crossings', overview['total_vehicle_crossings'])
+            m_col2.metric('Cars', overview['by_subtype'].get('car', 0))
+            m_col3.metric('Trucks', overview['by_subtype'].get('truck', 0))
+            m_col4.metric('Buses', overview['by_subtype'].get('bus', 0))
+            m_col5.metric('Motorcycles', overview['by_subtype'].get('motorcycle', 0))
+
+            b_col1, b_col2 = st.columns(2)
+            with b_col1:
+                st.markdown('**Crossings by Vehicle Subtype**')
+                st.table([
+                    {'Subtype': k.capitalize(), 'Crossings': v}
+                    for k, v in sorted(overview['by_subtype'].items())
+                    if v > 0 or k in ['car', 'truck', 'bus', 'motorcycle']
+                ])
+            with b_col2:
+                st.markdown('**Crossings by Direction**')
+                st.table([
+                    {'Direction': k.capitalize(), 'Crossings': v}
+                    for k, v in sorted(overview['by_direction'].items())
+                    if v > 0 or k in ['positive', 'negative']
+                ])
+
+            st.markdown('**Subtype × Direction Cross-tabulation**')
+            crosstab_rows = []
+            has_unspec_dir = any(overview['crosstab'].get(st_name, {}).get('unspecified', 0) > 0 for st_name in overview['crosstab'])
+            for st_name in ['car', 'truck', 'bus', 'motorcycle', 'unspecified']:
+                pos_c = overview['crosstab'].get(st_name, {}).get('positive', 0)
+                neg_c = overview['crosstab'].get(st_name, {}).get('negative', 0)
+                unspec_c = overview['crosstab'].get(st_name, {}).get('unspecified', 0)
+                sub_total = pos_c + neg_c + unspec_c
+                if sub_total > 0 or st_name in ['car', 'truck', 'bus', 'motorcycle']:
+                    row = {
+                        'Vehicle Subtype': st_name.capitalize(),
+                        'Positive': pos_c,
+                        'Negative': neg_c,
+                    }
+                    if has_unspec_dir:
+                        row['Unspecified Dir'] = unspec_c
+                    row['Total'] = sub_total
+                    crosstab_rows.append(row)
+            grand_row = {
+                'Vehicle Subtype': 'Grand Total',
+                'Positive': overview['by_direction'].get('positive', 0),
+                'Negative': overview['by_direction'].get('negative', 0),
+            }
+            if has_unspec_dir:
+                grand_row['Unspecified Dir'] = overview['by_direction'].get('unspecified', 0)
+            grand_row['Total'] = overview['total_vehicle_crossings']
+            crosstab_rows.append(grand_row)
+            st.table(crosstab_rows)
+
+        st.subheader('Natural Language Query')
         question = st.text_input('Question', 'How many vehicle crossings did CAM_01 record on October 9, 2026?')
         camera = st.text_input('Optional camera filter', '')
         source = st.selectbox('Source', ['all', 'synthetic', 'live'])
