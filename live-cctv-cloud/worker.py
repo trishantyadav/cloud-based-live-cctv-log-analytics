@@ -51,6 +51,8 @@ POLL_SECONDS = int(os.getenv("WORKER_POLL_SECONDS", "20"))
 MAX_MESSAGES = int(os.getenv("WORKER_MAX_MESSAGES", "5"))
 VISIBILITY_TIMEOUT = int(os.getenv("WORKER_VISIBILITY_TIMEOUT", "300"))
 HEARTBEAT_SECONDS = int(os.getenv("WORKER_HEARTBEAT_SECONDS", "60"))
+MAX_BATCHES = int(os.getenv("WORKER_MAX_BATCHES", "0"))
+EXIT_ON_EMPTY = os.getenv("WORKER_EXIT_ON_EMPTY", "0") in {"1", "true", "True"}
 
 DATA_DIR = Path(os.getenv("WORKER_DATA_DIR", "/app/data"))
 STATE_FILE = DATA_DIR / "processed_ids.json"
@@ -433,6 +435,7 @@ def main():
     print(f"Storage Backend: {runtime.config.backend}", flush=True)
     print(f"Previously acknowledged batches in cache: {len(processed_ids)}", flush=True)
 
+    processed_count = 0
     try:
         while True:
             try:
@@ -444,7 +447,12 @@ def main():
                     AttributeNames=["ApproximateReceiveCount"],
                 )
 
-                for message in response.get("Messages", []):
+                messages = response.get("Messages", [])
+                if not messages and EXIT_ON_EMPTY:
+                    print("Queue is empty and WORKER_EXIT_ON_EMPTY=1. Exiting cleanly.", flush=True)
+                    break
+
+                for message in messages:
                     try:
                         process_single_message(
                             message=message,
@@ -459,6 +467,10 @@ def main():
                             dlq_url=DLQ_URL or None,
                             s3_quarantine_prefix=QUARANTINE_S3_PREFIX or None,
                         )
+                        processed_count += 1
+                        if MAX_BATCHES > 0 and processed_count >= MAX_BATCHES:
+                            print(f"Reached WORKER_MAX_BATCHES={MAX_BATCHES}. Exiting cleanly.", flush=True)
+                            return
                     except Exception as exc:
                         print(f"Unhandled error processing message: {exc}", flush=True)
 
