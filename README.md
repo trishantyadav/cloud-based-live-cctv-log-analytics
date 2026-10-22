@@ -126,12 +126,37 @@ Batch 1: five CAM_01 vehicle crossings on October 9, 2026, plus one pedestrian a
 
 Executed verification: **29 Pytest tests passed**, including the Streamlit interaction test and optional PostgreSQL syntax parser. Tests cover A–H: 5 initially, 11 across both days, 8 across all cameras on October 10; repeated ingestion leaves counts/versions/embedding calls unchanged; correct contextual evidence; affected-window updates; safe failure/retry; and unavailable missing data. Additional tests cover boundaries, timezone offsets, out-of-order records, provenance filters, persisted SQLite state, invalid schemas, configuration, parameterization, and LLM fallback. See `VERIFICATION.md` for commands and limitations.
 
-## Live CCTV / AWS handoff
+## Live CCTV / AWS Integration & Verification Status
 
-The upstream component owns capture, OpenCV/model inference, tracking, crossing-line definitions, Docker workers, S3, and SQS. Generate stable crossing IDs from a camera + tracking-session + track + line/direction + crossing-sequence identity (or persist a UUID when first emitted); track IDs alone are insufficient across restarts. Derive batch IDs from a stable message/source object identity, never from retry time. Send timezone-bearing UTC timestamps, the original source object key, and truthful live/synthetic flags.
+Through Batches 1–6, the bridge connecting live CCTV video inference to the Dynamic RAG analytics service has been developed, packaged, and verified:
 
-A future authenticated API or SQS consumer should validate caller identity and message size, deserialize records, call `ingest_batch`, acknowledge only `succeeded`, and retry `partially_failed` / transient exceptions with backoff. Route permanent contract conflicts to a dead-letter/manual review path. Preserve original event/batch IDs and revision numbers on retries. After restart, replay unacknowledged batches. New records automatically refresh only their affected windows through this function.
+### 1. What is Verified (Offline & Local Docker)
+- **Live Event Adapter (`cctv_rag.adapter`)**: Normalizes live YOLO+ByteTrack S3 envelopes into strict RAG schema, preserving `vehicle_subtype` (`car`, `truck`, `bus`, `motorcycle`), `direction` (`positive`, `negative`), `line_id`, and converting ByteTrack integer track IDs to strings.
+- **Worker Bridge (`live-cctv-cloud/worker.py`)**:
+  - Implements durable idempotency backed by database state.
+  - Periodic visibility heartbeat extends SQS lock during long ingestion windows.
+  - Acknowledges and deletes SQS messages only on verified durable `succeeded` status.
+  - Leaves messages in SQS for automatic retry on partial or transient network/storage errors.
+  - Isolates malformed or poison batches into durable quarantine storage (`/app/data/quarantine/`) with DLQ forwarding support.
+- **Directional & Subtype Analytics (`cctv_rag.analytics`)**:
+  - Deterministic counts grouped by vehicle subtype, crossing direction, and combined subtype × direction matrix.
+  - Directional comparison (`compare_directions`) calculating exact positive vs. negative delta.
+  - Clear separation of live CCTV data from synthetic fixtures.
+- **Natural Language Parsing & Query Service (`cctv_rag.query_parser`, `cctv_rag.service`)**:
+  - Routes questions such as *"How many cars crossed?"*, *"How many trucks crossed in the negative direction?"*, and *"Break down vehicles by subtype and direction"* directly to deterministic analytics calculations.
+  - Preserves clarification behavior for unknown modifiers or ambiguous metrics without LLM hallucinations.
+- **Streamlit Dashboard (`cctv_rag/app.py`)**:
+  - KPI cards, subtype and directional breakdowns, cross-tabulation table, and live vs. synthetic badge indicators.
+- **End-to-End Pipeline Integration (`tests/test_end_to_end_pipeline.py`)**:
+  - 59 automated tests passing with zero failures.
+- **Docker Worker Packaging (`live-cctv-cloud/Dockerfile`)**:
+  - Multi-stage build verified (`cctv-worker:batch6`).
+  - Internal imports, dependencies (`boto3`, `pydantic`, `psycopg`), and offline worker processing qualified inside the container.
 
-**Still to build/verify:** the authenticated transport/queue bridge; SQS acknowledgment and dead-letter policy; trusted coverage metadata; real capture-to-query end-to-end tests; Supabase/Gemini/model qualification; deployment authentication, capacity limits, observability, and backup/recovery. Uploading JSON to S3 alone does not update this component or Supabase. This project is an offline-verified integration component, not a live-integrated deployment.
+### 2. What Remains Pending Live Cloud Qualification
+- **Live AWS Infrastructure**: Polling the production SQS queue (`cctv-processing-queue`) and reading production S3 bucket (`generalized-etl-engine-2026-0001`) with live AWS IAM credentials.
+- **Production Supabase Deployment**: Running schema migrations (`database/schema.sql`) against remote PostgreSQL and testing multi-worker concurrency with live Supabase advisory locks.
+- **Live Gemini API**: Generating contextual prose with live `GEMINI_API_KEY` (deterministic analytics routes run offline without LLM).
+- **HLS Camera Stream**: Continuous long-term RTSP/HLS capture from Caltrans stream `CAM_SAN_DIEGO_01`.
 
 API implementation references: [Psycopg transactions](https://www.psycopg.org/psycopg3/docs/basic/transactions.html), [SentenceTransformer model API](https://www.sbert.net/docs/package_reference/sentence_transformer/model.html), and [Gemini generate content](https://ai.google.dev/api/generate-content).

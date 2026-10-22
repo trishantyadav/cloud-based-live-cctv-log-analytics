@@ -14,7 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install RAG modules as a package
 COPY pyproject.toml ./pyproject.toml
 COPY *.py ./cctv_rag/
-RUN pip install --no-cache-dir --no-deps -e ./cctv_rag || true
+COPY *.py ./
+RUN pip install --no-cache-dir --no-deps -e .
 
 # Copy worker application
 COPY live-cctv-cloud/worker.py ./worker.py

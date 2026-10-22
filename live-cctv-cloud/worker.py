@@ -263,7 +263,7 @@ def process_single_message(
 
     batch_id = body.get("batch_id")
     bucket = body.get("bucket")
-    s3_key = body.get("s3_key")
+    s3_key = body.get("s3_key") or body.get("key")
 
     if not isinstance(batch_id, str) or not batch_id.strip():
         try:
