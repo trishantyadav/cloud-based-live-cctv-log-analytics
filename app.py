@@ -10,16 +10,37 @@ from cctv_rag.analytics import vehicle_analytics_overview
 def main():
     st.set_page_config(page_title='CCTV Record Analytics', layout='wide')
     st.title('CCTV Record Analytics')
-    st.caption('Development component. No cameras or AWS pipeline are connected by this application.')
+    st.caption('Development component. Connects to SQLite/PostgreSQL storage, deterministic analytics, and optional Gemini/MiniLM.')
     try:
         runtime = Runtime()
     except Exception:
         st.error('Startup failed. Check STORAGE_BACKEND, DATABASE_URL, TIME_ZONE, optional provider configuration, and installed dependencies. See README. Credentials are not displayed.')
         return
     try:
+        # System & AI Service Status
+        stat_col1, stat_col2, stat_col3 = st.columns(3)
+        with stat_col1:
+            st.metric('Storage Backend', runtime.config.backend.upper())
+        with stat_col2:
+            if runtime.embedder is not None:
+                st.metric('Embeddings', 'MiniLM (Active)')
+            elif runtime.config.embedding_mode == 'minilm':
+                st.metric('Embeddings', 'MiniLM (Unavailable/Offline)')
+            else:
+                st.metric('Embeddings', 'Disabled (Metadata Only)')
+        with stat_col3:
+            if runtime.llm is not None:
+                st.metric('Gemini LLM', f'Configured ({runtime.config.gemini_model})')
+            else:
+                st.metric('Gemini LLM', 'Disabled (Deterministic Only)')
+
+        if getattr(runtime, 'embedder_error', None):
+            st.warning(runtime.embedder_error)
+
         st.info(f'Storage: {runtime.config.backend}. Embeddings: {runtime.config.embedding_mode}. '
                 'Without embeddings, retrieval uses camera/time metadata only. Without Gemini, answers use deterministic evidence.')
         st.warning('Coverage is unknown. Recorded counts are not complete traffic totals. Synthetic data is test data.')
+
         with st.expander('Development ingestion', expanded=False):
             batch_choice = st.selectbox('Synthetic fixture', ['batch_001', 'batch_002'])
             if st.button('Ingest selected synthetic batch'):
@@ -137,6 +158,11 @@ def main():
                 result = runtime.service.ask(question, camera=camera.strip() or None, start=start, end=end,
                                              source=None if source == 'all' else source)
                 st.subheader('Answer')
+                if result.get('generation') == 'gemini':
+                    st.success('🤖 Grounded Gemini Explanation')
+                else:
+                    st.info('📊 Deterministic Analytics / Structured Evidence')
+
                 st.write(result['answer'])
                 st.caption(result['interpretation'])
                 for key in ('service_warning', 'retrieval_warning', 'window_notice'):
@@ -145,7 +171,21 @@ def main():
                 if result['analytics'] is not None:
                     st.json(result['analytics'])
                 with st.expander('Current summary evidence'):
-                    st.json(result['evidence'])
+                    evidence_list = result.get('evidence', [])
+                    if evidence_list and any('score' in r for r in evidence_list):
+                        st.caption('🔍 Semantic Retrieval Results (ranked by cosine similarity):')
+                        st.table([
+                            {
+                                'Summary ID': (r.get('id') or '')[:12] + '...',
+                                'Camera': r.get('camera_id'),
+                                'Window Start': r.get('start'),
+                                'Relevance Score': f"{r.get('score', 0):.4f}",
+                                'Summary': r.get('text'),
+                            }
+                            for r in evidence_list
+                        ])
+                    else:
+                        st.json(evidence_list)
             except (Clarification, ValueError) as exc:
                 st.warning(str(exc))
             except Exception:

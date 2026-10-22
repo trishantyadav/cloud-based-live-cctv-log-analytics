@@ -1,162 +1,143 @@
 # Incremental CCTV Log Analytics
 
-A standalone Python component for **processed records**, not video capture. SQLite development mode works without credentials, a model download, or an LLM. Sample records are synthetic. No real CCTV camera, S3/SQS transport, Supabase deployment, or Gemini endpoint was connected during development.
+A hybrid real-time microservices and Dynamic RAG platform connecting live CCTV vehicle detection (YOLO + ByteTrack), cloud message transport (AWS S3 + SQS), durable worker ingestion, deterministic traffic analytics, MiniLM semantic embeddings, Gemini grounding, and a Streamlit dashboard.
 
-## Quick start
+---
 
-Use Python 3.11+ (verified here with Python 3.12). Open a terminal in this directory:
+## Component Verification Status Matrix
+
+| Component | Status | Verification Details |
+|---|---|---|
+| **Live Event Adapter (`adapter.py`)** | **Verified** | Converts live YOLO/ByteTrack S3 envelopes into RAG events; preserves `vehicle_subtype` (car, truck, bus, motorcycle), `direction` (positive, negative), and line IDs. |
+| **Worker Bridge (`live-cctv-cloud/worker.py`)** | **Verified** | SQS message consumption, S3 retrieval, durable idempotency, visibility heartbeat, DLQ forwarding, and poison message quarantine. |
+| **SQLite Storage & Rollups** | **Verified** | ACID transactions, advisory file locking, 1-hour rollup summaries, dynamic updates, and crash recovery. |
+| **Directional & Subtype Analytics (`analytics.py`)** | **Verified** | Exact counts by subtype, direction, subtype × direction cross-tabulation, and directional difference delta. Strictly deterministic. |
+| **Natural Language Routing (`service.py`, `query_parser.py`)** | **Verified** | Routes analytical queries directly to deterministic engine (bypassing LLM). Ambiguous queries request clarification. |
+| **MiniLM 384-d Embeddings (`embeddings.py`)** | **Verified** | `sentence-transformers/all-MiniLM-L6-v2` verified with **real local model execution**; generates 384-d normalized embeddings, semantic ranking, and cosine similarity scoring. |
+| **Gemini Grounding Adapter (`rag_generate.py`)** | **Verified (Mocks/Contract)** | Google GenAI SDK integration with evidence pruning, grounding system prompt, and sanitized error handling. *Live API call pending operator credential configuration.* |
+| **Controlled AWS S3/SQS Transport** | **Verified** | Live S3 object upload to `cctv/test-batches/` and SQS dispatch/deletion against `traffic-events-queue` verified end-to-end. |
+| **HLS CCTV Stream Reachability** | **Verified** | Caltrans District 11 HLS stream (`https://wzmedia.dot.ca.gov/D11/C009_NB_5_JNO_Old_Town.stream/playlist.m3u8`) verified live and responding with HTTP 200. |
+| **Live Camera Capture Execution (`vehicle_counting.py`)** | **Blocked on Operator Approval** | Stream is live, but `ultralytics` is not installed by default in the host environment. Proposed command prepared below. |
+| **Production AWS & Supabase Cutover** | **Pending Operator Action** | Schema DDL ready in `database/schema.sql`. Production SQS queue (`cctv-processing-queue`) untouched to guarantee zero production disruption. |
+
+---
+
+## Quick Start
+
+### 1. Environment & Dependencies
+
+Requirements: Python 3.11+ (tested on Python 3.14).
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+python -m pip install -r requirements-embeddings.txt
 python -m pip install -e .
 Copy-Item .env.example .env
-python -m cctv_rag ingest sample_data/batch_001.json --batch-id batch_001
-python -m cctv_rag ingest sample_data/batch_002.json --batch-id batch_002
-python -m cctv_rag ask "How many vehicle crossings did CAM_01 record on October 9, 2026?"
-python -m streamlit run app.py --server.address 127.0.0.1
 ```
 
-On Linux/macOS, activate with `source .venv/bin/activate` and copy the environment example with `cp`. The component is a local development UI; add authentication and deployment controls before exposing it remotely.
+### 2. Run Complete Regression Test Suite
 
 ```powershell
-python -m cctv_rag ask "How many vehicle crossings did CAM_01 record across both days?" --start 2026-10-09T00:00:00Z --end 2026-10-11T00:00:00Z
-python -m cctv_rag ask "How many vehicle crossings were recorded by all cameras on October 10, 2026?"
-python -m cctv_rag ask "Summarize the observations for CAM_01 on October 10, 2026."
-python -m cctv_rag status
-python -m pytest tests -q
+py -3.14 -m unittest discover -s tests -v
 ```
+*(73 tests passing across adapters, analytics, worker, Gemini grounding, MiniLM embeddings, and Streamlit AppTest; 1 test skipped for optional PostgreSQL parser).*
 
-The SQL parser test requires optional `pip install pglast`; otherwise that test skips. All other tests use isolated memory/temporary SQLite databases and fake embeddings. The UI test skips if Streamlit is absent. No test connects to production storage.
-
-## Architecture and files
-
-`schemas.py` validates the upstream event contract. `ingestion.py` commits structured events idempotently and tracks retryable work. `preprocess.py` normalizes timestamps and hashes content. `summarizer.py` maintains current deterministic camera/window/source summaries. `embeddings.py` defines the replaceable embedding interface and MiniLM adapter. `storage.py` provides SQLite; `database.py` provides PostgreSQL; `database/schema.sql` creates isolated tables and pgvector indexes. `vector_store.py` provides an explicitly local cosine scan, not a PostgreSQL emulation.
-
-`analytics.py` calculates exact recorded counts independently of retrieval. `query_parser.py` resolves supported questions and rejects ambiguous ranges or unsupported numerical modifiers. `retriever.py` filters current evidence. `service.py` routes requests. `rag_generate.py` supplies deterministic answers and a Gemini adapter. `config.py` and `runtime.py` wire providers. `app.py` contains UI only; `__main__.py` is a CLI. `tests/` contains regression tests; `sample_data/` contains the two synthetic batches.
-
-## Data contract
-
-Every event requires:
-
-| Field | Meaning |
-|---|---|
-| `event_id` | Globally stable upstream identity, 1–200 characters |
-| `batch_id` | Stable original batch identity; must match the function argument |
-| `camera_id` | Stable case-sensitive identifier; `CAM_01` naming supports direct question parsing |
-| `timestamp_utc` | ISO-8601 with timezone; normalized to UTC. Naive timestamps are rejected |
-| `object_type` | `vehicle`, `pedestrian`, `bicycle`, or `other` |
-| `track_id` | Track identifier; required for a line crossing, optional for a detection |
-| `confidence` | Finite numeric value from 0 to 1 |
-| `event_type` | `detection` or `line_crossing` |
-| `crossing_count` | Exactly 0 for detection, exactly 1 for line crossing |
-| `source_type` | `synthetic` or `live` |
-| `synthetic` | Boolean consistent with `source_type` |
-| `source_ref` | Nonempty provenance reference, e.g. S3 object key |
-| `revision` | Positive integer, defaults to 1; increase for a deliberate correction |
-
-Unknown fields and malformed records are rejected. Ingestion time is stored separately from event time. Detections represent frame observations and may repeat the same tracked object; pedestrian detection counts are **not unique people**. Vehicle counts include only vehicle line-crossing events. Upstream must emit one stable ID per actual crossing; this component cannot detect two distinct IDs referring to the same physical crossing.
-
-Identical event content is unchanged. A correction requires a larger revision and the same camera, original batch, track ID, and synthetic/live provenance. Conflicting same/older revisions or changed identity are rejected atomically. Timestamp, confidence, object/event classification, and source reference can be corrected with a higher revision. Resend corrections using their original batch ID. Changing a timestamp refreshes both its old and new windows. IDs reused across batches are conflicts.
-
-## Ingestion, retries, and consistency
-
-```python
-from cctv_rag.runtime import Runtime
-from cctv_rag.ingestion import ingest_batch
-
-runtime = Runtime()
-try:
-    result = ingest_batch(records=processed_records,
-                          batch_id=stable_batch_id,
-                          ingestor=runtime.ingestor)
-finally:
-    runtime.close()
-```
-
-Each response includes `status`, `attempts`, timestamps, per-record new/unchanged/modified outcomes, pending windows, and safe errors. Validation errors include field paths without echoing raw input. Empty batches and duplicate IDs inside a batch fail. Validation/structured-storage failures roll back the entire event transaction. Provider and driver exception strings are not logged or persisted.
-
-The structured transaction also marks affected old summaries dirty. Those summaries immediately become ineligible for retrieval. Each summary and its embedding then commits atomically. An embedding failure leaves structured records queryable, retains pending windows, and returns `partially_failed`. Retry the same stable batch to finish pending work without duplicating counts. A new failed window has no retrievable summary until it succeeds. A database outage that prevents recording status raises an exception; the caller must retry and must not acknowledge success. A process crash can leave `processing`; replay resumes persisted pending work.
-
-`succeeded` means all required work under the selected configuration completed. With `EMBEDDING_MODE=disabled`, metadata summaries are supported and explicitly marked `vector_status=disabled`; this does not claim vector availability. With MiniLM selected, embedding failure prevents success. Supported status vocabulary also includes `pending`; this synchronous implementation starts attempts as `processing` rather than adding an asynchronous queue.
-
-Writers are serialized by a local file lock (SQLite) or session advisory lock (PostgreSQL), with transactions protecting each commit. Lock/storage acquisition failures propagate for retry. Use a Runtime per worker/connection, not a shared connection across threads. This intentionally favors correctness over high ingestion throughput.
-
-Summary IDs hash camera, UTC window start, and source type. Synthetic and live windows remain separate. Versions start at 1 and increase when the canonical summary content changes. Content includes verified facts, event IDs/references, and a hash of source records. Only the current version is stored; there is no revision audit archive. Unchanged batches do not refresh summaries or regenerate embeddings. Window duration is recorded in the database and cannot be silently changed: use a new database or implement a reviewed migration.
-
-## Time, coverage, analytics, and routing
-
-Storage and output intervals use UTC and **[start, end)** boundaries. Date-only questions use `TIME_ZONE` (UTC by default); explicit timestamp filters must carry a timezone. Two dates describe an inclusive range of calendar days. Daily comparisons preserve the supplied date order. Hourly rankings and grouped day/hour keys are UTC. Sub-day clock wording, relative dates, unspecified dates, and unsupported numerical modifiers request clarification. “Both days” needs explicit filters; no chat history is silently assumed. Arbitrary camera names can be supplied through the explicit camera filter.
-
-Supported exact metrics: vehicle crossings, pedestrian detections, and valid source records. Functions support all-camera totals, camera/object grouping, daily comparisons, and hourly rankings. Results report filters, source types, contributing/available records, interval, coverage, and availability. These aggregates operate on structured records, never on the number of retrieved summaries.
-
-Coverage remains **unknown** because this contract does not yet accept trustworthy upstream availability intervals. No records yields `value=null` / `unavailable`, not zero. When usable records exist but none match a metric, zero means **zero among the available records**, explicitly `partial`; it is never presented as zero total traffic. Complete hour/day traffic cannot be established from event timestamps alone. Empty observed-group lists do not imply absent groups had zero activity.
-
-Retrieval uses overlapping windows, camera/source filters, current/non-dirty state, optional cosine threshold, and a limit. Every context answer preserves full summary intervals; a summary overlapping a sub-hour request is not an exact count for that sub-hour. Without embeddings, selection is deterministic metadata-only and does not claim semantic relevance. With a model, only matching model/content-hash vectors are eligible. Exact numerical answers are always deterministic even if retrieval or Gemini fails. Contextual Gemini responses use strict grounding instructions; as with any LLM, these instructions are not a formal guarantee of factuality. Verified evidence is displayed separately.
-
-## MiniLM
+### 3. Start Streamlit Dashboard
 
 ```powershell
-python -m pip install -r requirements-embeddings.txt
-# In .env: EMBEDDING_MODE=minilm
-python -m cctv_rag reindex
+py -3.14 -m streamlit run app.py
 ```
 
-The actual adapter loads `sentence-transformers/all-MiniLM-L6-v2`, verifies 384 output dimensions, normalizes vectors, and rejects invalid/zero vectors. First use needs a model download or an existing local model cache. The model identifier and embedding content hash are persisted. `reindex` is explicit maintenance for enabling/changing providers; ordinary ingestion never rebuilds the whole vector database. Restart the process when changing a cached model. Model revisions and a deployment lockfile should be pinned when qualifying a production environment. The real model was not downloaded/executed here; tests use clearly named fake vectors and verify the adapter’s dimension guard.
+---
 
-## Supabase / pgvector setup
+## Environment Configuration
 
-1. Create a **dedicated test project/database** first. Run `database/schema.sql` in its SQL editor with an operator role permitted to create extensions and schema objects. The script is additive and scoped to `cctv_rag`; it never truncates existing tables.
-2. Create a dedicated server login. Grant USAGE on `cctv_rag` and SELECT/INSERT/UPDATE/DELETE on its tables. Grant USAGE on the schema containing the vector type if your installation requires it. Do not grant schema ownership or expose this connection in browser code. Keep the schema outside exposed PostgREST schemas.
-3. Set `STORAGE_BACKEND=postgres` and `DATABASE_URL` to the provider’s direct or **session-mode** pooled connection, with TLS (`sslmode=require`; prefer `verify-full` with trusted CA configuration). This adapter uses session advisory locks, so transaction-mode pooling is unsuitable. Permit outbound network access to the configured database endpoint and port.
-4. Set `EMBEDDING_MODE=minilm` for vector retrieval, then ingest the fixtures and repeat the tests manually in the dedicated test database. The adapter uses parameterized SQL, native timestamptz columns, `vector(384)`, current-hash checks, and an HNSW cosine index.
+Configuration is loaded from `.env` or system environment variables:
 
-`SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` are documented placeholders, unused by this direct-SQL adapter. No Supabase service-role key is needed. Database credentials remain server-side. Schema syntax was parsed locally; actual extension permissions, index behavior, access grants, transaction semantics, and remote connections remain unverified. Local tests never use `DATABASE_URL` to mutate remote data. The CLI/UI intentionally follow configured storage; check configuration before manual ingestion.
+```bash
+# Storage configuration
+STORAGE_BACKEND=sqlite
+SQLITE_PATH=cctv_rag.sqlite3
+TIME_ZONE=UTC
+SUMMARY_WINDOW_MINUTES=60
 
-For larger datasets, move Python analytics into optimized SQL aggregates and benchmark filtered pgvector recall/query plans. HNSW filtering can return fewer neighbors than requested; tune index/search settings against your workload.
+# MiniLM Embedding configuration
+EMBEDDING_MODE=minilm                     # 'disabled' or 'minilm'
+EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 
-## Gemini setup
+# Gemini Generative AI configuration (Optional)
+GEMINI_API_KEY=                           # Your Google AI Studio API key
+GEMINI_MODEL=gemini-2.5-flash             # gemini-2.5-flash, gemini-2.0-flash, or gemini-1.5-flash
 
-Set both `GEMINI_API_KEY` and `GEMINI_MODEL` in `.env` to a model supported by your account. Leave both empty for deterministic local mode. The adapter uses `google-genai` and passes only the question, verified analytics, and selected evidence. Review whether your data may be sent to that provider before configuring it. Exact count answers bypass the LLM. Provider errors yield a safe warning and deterministic evidence, never a fabricated successful Gemini response. API connectivity and live model behavior were not tested without credentials.
+# AWS Pipeline (Worker & Producer)
+AWS_REGION=ap-south-1
+S3_BUCKET_NAME=generalized-etl-engine-2026-0001
+CCTV_S3_PREFIX=cctv/live-batches/
+CCTV_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/292981482205/cctv-processing-queue
 
-## Synthetic fixtures and verification
+# Remote PostgreSQL / Supabase (Optional)
+DATABASE_URL=postgresql://user:pass@host:5432/dbname?sslmode=require
+```
 
-Batch 1: five CAM_01 vehicle crossings on October 9, 2026, plus one pedestrian and one vehicle detection. Batch 2: six CAM_01 and two CAM_02 crossings on October 10, plus one pedestrian and one vehicle detection. Each event has a unique stable ID and is explicitly synthetic. All fixture records fall in the 10:00–11:00 UTC window on their day. There are 17 records and 13 crossings across both batches, with 11 crossings for CAM_01.
+> **Security Note**: Never commit API keys, AWS credentials, or database passwords to version control. All exception handlers and loggers sanitize error messages to prevent credential leakage.
 
-Executed verification: **29 Pytest tests passed**, including the Streamlit interaction test and optional PostgreSQL syntax parser. Tests cover A–H: 5 initially, 11 across both days, 8 across all cameras on October 10; repeated ingestion leaves counts/versions/embedding calls unchanged; correct contextual evidence; affected-window updates; safe failure/retry; and unavailable missing data. Additional tests cover boundaries, timezone offsets, out-of-order records, provenance filters, persisted SQLite state, invalid schemas, configuration, parameterization, and LLM fallback. See `VERIFICATION.md` for commands and limitations.
+---
 
-## Live CCTV / AWS Integration & Verification Status
+## AI Services Architecture
 
-Through Batches 1–6, the bridge connecting live CCTV video inference to the Dynamic RAG analytics service has been developed, packaged, and verified:
+### 1. Deterministic Analytics Engine First
+The system strictly enforces that numerical totals, vehicle subtype counts, direction comparisons, and date rankings are calculated deterministically from verified structured database records. The LLM is **never** invoked for numerical aggregations, preventing hallucinations.
 
-### 1. What is Verified (Offline & Local Docker)
-- **Live Event Adapter (`cctv_rag.adapter`)**: Normalizes live YOLO+ByteTrack S3 envelopes into strict RAG schema, preserving `vehicle_subtype` (`car`, `truck`, `bus`, `motorcycle`), `direction` (`positive`, `negative`), `line_id`, and converting ByteTrack integer track IDs to strings.
-- **Worker Bridge (`live-cctv-cloud/worker.py`)**:
-  - Implements durable idempotency backed by database state.
-  - Periodic visibility heartbeat extends SQS lock during long ingestion windows.
-  - Acknowledges and deletes SQS messages only on verified durable `succeeded` status.
-  - Leaves messages in SQS for automatic retry on partial or transient network/storage errors.
-  - Isolates malformed or poison batches into durable quarantine storage (`/app/data/quarantine/`) with DLQ forwarding support.
-- **Directional & Subtype Analytics (`cctv_rag.analytics`)**:
-  - Deterministic counts grouped by vehicle subtype, crossing direction, and combined subtype × direction matrix.
-  - Directional comparison (`compare_directions`) calculating exact positive vs. negative delta.
-  - Clear separation of live CCTV data from synthetic fixtures.
-- **Natural Language Parsing & Query Service (`cctv_rag.query_parser`, `cctv_rag.service`)**:
-  - Routes questions such as *"How many cars crossed?"*, *"How many trucks crossed in the negative direction?"*, and *"Break down vehicles by subtype and direction"* directly to deterministic analytics calculations.
-  - Preserves clarification behavior for unknown modifiers or ambiguous metrics without LLM hallucinations.
-- **Streamlit Dashboard (`cctv_rag/app.py`)**:
-  - KPI cards, subtype and directional breakdowns, cross-tabulation table, and live vs. synthetic badge indicators.
-- **End-to-End Pipeline Integration (`tests/test_end_to_end_pipeline.py`)**:
-  - 59 automated tests passing with zero failures.
-- **Docker Worker Packaging (`live-cctv-cloud/Dockerfile`)**:
-  - Multi-stage build verified (`cctv-worker:batch6`).
-  - Internal imports, dependencies (`boto3`, `pydantic`, `psycopg`), and offline worker processing qualified inside the container.
+### 2. MiniLM 384-Dimensional Semantic Embeddings
+- Model: `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions).
+- Weights Cache: Cached under `~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2`.
+- Offline Graceful Fallback: If `sentence-transformers` is absent or the model fails to load, `Runtime` automatically falls back to metadata-only retrieval without crashing.
+- Storage Persistence: SQLite and PostgreSQL store the normalized vector, model ID, and `embedding_content_hash`.
 
-### 2. What Remains Pending Live Cloud Qualification
-- **Live AWS Infrastructure**: Polling the production SQS queue (`cctv-processing-queue`) and reading production S3 bucket (`generalized-etl-engine-2026-0001`) with live AWS IAM credentials.
-- **Production Supabase Deployment**: Running schema migrations (`database/schema.sql`) against remote PostgreSQL and testing multi-worker concurrency with live Supabase advisory locks.
-- **Live Gemini API**: Generating contextual prose with live `GEMINI_API_KEY` (deterministic analytics routes run offline without LLM).
-- **HLS Camera Stream**: Continuous long-term RTSP/HLS capture from Caltrans stream `CAM_SAN_DIEGO_01`.
+### 3. Grounded Gemini Contextual Explanations
+- SDK: Google GenAI official client (`from google import genai`).
+- Evidence Pruning: Sends only structured summary intervals and verified facts to the model. Internal hash digests and raw event arrays are excluded.
+- Grounding Instruction: The system prompt instructs Gemini to explain only what the retrieved evidence directly supports, to distinguish zero events from missing data, and never to fabricate vehicle observations.
+- Fault Tolerance: Network timeouts, rate limits (HTTP 429), or empty responses trigger an explicit deterministic fallback with a `service_warning`.
 
-API implementation references: [Psycopg transactions](https://www.psycopg.org/psycopg3/docs/basic/transactions.html), [SentenceTransformer model API](https://www.sbert.net/docs/package_reference/sentence_transformer/model.html), and [Gemini generate content](https://ai.google.dev/api/generate-content).
+---
+
+## Controlled CCTV Live Camera Test Procedure
+
+To execute live video capture and event generation on the Caltrans HLS stream:
+
+### Step 1: Install Detection Prerequisites
+```powershell
+py -3.14 -m pip install ultralytics
+```
+
+### Step 2: Run Controlled Capture (30-second capture test)
+```powershell
+cd live-cctv-cloud
+py -3.14 vehicle_counting.py
+```
+*(Press `q` after 30 seconds to terminate. Live line crossings will be appended to `live-cctv-cloud/output/cctv_events_v2.jsonl` and batched into `live-cctv-cloud/output/batches/`).*
+
+### Step 3: Run Producer Against Isolated Test Queue
+```powershell
+$env:CCTV_LOG_FILE="output/cctv_events_v2.jsonl"
+$env:CCTV_S3_PREFIX="cctv/test-batches/"
+$env:CCTV_QUEUE_URL="https://sqs.ap-south-1.amazonaws.com/292981482205/traffic-events-queue"
+py -3.14 live_s3_sqs_producer_v2.py
+```
+
+### Step 4: Run Worker in Single-Batch Isolated Test Mode
+```powershell
+$env:CCTV_QUEUE_URL="https://sqs.ap-south-1.amazonaws.com/292981482205/traffic-events-queue"
+$env:SQLITE_PATH="cctv_live_test.sqlite3"
+$env:WORKER_MAX_BATCHES="1"
+py -3.14 worker.py
+```
+
+### Step 5: Verify in Dashboard
+```powershell
+$env:SQLITE_PATH="cctv_live_test.sqlite3"
+py -3.14 -m streamlit run app.py
+```

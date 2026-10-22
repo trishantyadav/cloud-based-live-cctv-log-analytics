@@ -11,17 +11,17 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 
 # ---------- AWS CONFIGURATION ----------
-REGION = "ap-south-1"
-BUCKET = "generalized-etl-engine-2026-0001"
+REGION = os.getenv("AWS_REGION", "ap-south-1")
+BUCKET = os.getenv("S3_BUCKET_NAME", "generalized-etl-engine-2026-0001")
 
 S3_PREFIX = os.getenv(
     "CCTV_S3_PREFIX",
     "cctv/live-batches/",
 ).strip("/") + "/"
 
-QUEUE_URL = (
-    "https://sqs.ap-south-1.amazonaws.com/"
-    "292981482205/cctv-processing-queue"
+QUEUE_URL = os.getenv(
+    "CCTV_QUEUE_URL",
+    "https://sqs.ap-south-1.amazonaws.com/292981482205/cctv-processing-queue",
 )
 
 # ---------- LOCAL FILES ----------

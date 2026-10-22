@@ -15,10 +15,13 @@ class Retriever:
             raise ValueError('invalid source')
         vector = validate_vector(self.embedder.embed_text(question), self.embedder.dimension) if self.embedder else None
         if vector is not None and self.store.dialect == 'postgres':
-            return self.store.search(vector, self.embedder.model_id, start, end, camera, source, limit, threshold)
+            results = self.store.search(vector, self.embedder.model_id, start, end, camera, source, limit, threshold)
+            return [r | {'retrieval_mode': 'semantic', 'requested_start': start, 'requested_end': end} for r in results]
+
         rows = [r for r in self.store.summaries() if r['current'] and not r.get('dirty') and r['facts']['valid_records']
                 and r['start'] < end and r['end'] > start and (camera is None or r['camera_id'] == camera)
                 and (source is None or r['source_type'] == source)]
         if vector is None:
             return [r | {'retrieval_mode': 'metadata_only', 'requested_start': start, 'requested_end': end} for r in rows[:limit]]
-        return local_search(rows, vector, self.embedder.model_id, threshold, limit)
+        searched = local_search(rows, vector, self.embedder.model_id, threshold, limit)
+        return [r | {'retrieval_mode': 'semantic', 'requested_start': start, 'requested_end': end} for r in searched]
