@@ -15,28 +15,47 @@ def contribution(record, metric):
     raise ValueError('unsupported metric')
 
 
-def count(store, metric, start, end, camera=None, source=None):
+def count(store, metric, start, end, camera=None, source=None, vehicle_subtype=None, direction=None):
     if metric not in METRICS:
         raise ValueError('unsupported metric')
     if source not in {None, 'synthetic', 'live'}:
         raise ValueError('unsupported source')
     start, end = interval(start, end)
     rows = store.events(start, end, camera, source)
+    if vehicle_subtype is not None:
+        rows = [r for r in rows if r.get('vehicle_subtype') == vehicle_subtype]
+    if direction is not None:
+        rows = [r for r in rows if r.get('direction') == direction]
     value = sum(contribution(r, metric) for r in rows) if rows else None
-    return dict(metric=metric, filters={'camera': camera, 'source': source}, start=start, end=end,
+    filters = {'camera': camera, 'source': source}
+    if vehicle_subtype is not None:
+        filters['vehicle_subtype'] = vehicle_subtype
+    if direction is not None:
+        filters['direction'] = direction
+    return dict(metric=metric, filters=filters, start=start, end=end,
                 value=value, data_source='structured_events', source_types=sorted({r['source_type'] for r in rows}),
                 contributing_records=sum(bool(contribution(r, metric)) for r in rows),
                 valid_records=len(rows), coverage='unknown', status='partial' if rows else 'unavailable')
 
 
-def grouped(store, metric, start, end, by='camera', camera=None, source=None):
+def grouped(store, metric, start, end, by='camera', camera=None, source=None, vehicle_subtype=None, direction=None):
     start, end = interval(start, end)
-    if by not in {'camera', 'object_type', 'day', 'hour'} or metric not in METRICS:
+    if by not in {'camera', 'object_type', 'vehicle_subtype', 'direction', 'day', 'hour'} or metric not in METRICS:
         raise ValueError('unsupported grouping or metric')
     buckets = defaultdict(list)
-    for row in store.events(start, end, camera, source):
-        key = {'camera': row['camera_id'], 'object_type': row['object_type'],
-               'day': row['timestamp_utc'][:10], 'hour': row['timestamp_utc'][:13]}[by]
+    rows = store.events(start, end, camera, source)
+    if vehicle_subtype is not None:
+        rows = [r for r in rows if r.get('vehicle_subtype') == vehicle_subtype]
+    if direction is not None:
+        rows = [r for r in rows if r.get('direction') == direction]
+    for row in rows:
+        if by == 'vehicle_subtype':
+            key = row.get('vehicle_subtype') or 'unspecified'
+        elif by == 'direction':
+            key = row.get('direction') or 'unspecified'
+        else:
+            key = {'camera': row['camera_id'], 'object_type': row['object_type'],
+                   'day': row['timestamp_utc'][:10], 'hour': row['timestamp_utc'][:13]}[by]
         buckets[key].append(row)
     return [{'group': key, 'value': sum(contribution(r, metric) for r in rows),
              'valid_records': len(rows), 'coverage': 'unknown', 'status': 'partial'} for key, rows in sorted(buckets.items())]

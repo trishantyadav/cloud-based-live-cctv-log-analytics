@@ -10,16 +10,26 @@ class Event(BaseModel):
     camera_id: str = Field(min_length=1, max_length=100)
     timestamp_utc: datetime
     object_type: Literal['vehicle', 'pedestrian', 'bicycle', 'other']
+    vehicle_subtype: Literal['car', 'truck', 'bus', 'motorcycle'] | None = None
     track_id: str | None = None
     confidence: float = Field(ge=0, le=1)
     crossing_count: int = Field(ge=0, le=1)
     event_type: Literal['detection', 'line_crossing']
+    line_id: str | None = Field(default=None, max_length=100)
+    direction: Literal['positive', 'negative'] | None = None
     source_type: Literal['synthetic', 'live']
     source_ref: str = Field(min_length=1)
     synthetic: bool
     revision: int = Field(default=1, ge=1)
 
-    @field_validator('event_id', 'batch_id', 'camera_id', 'track_id')
+    @field_validator('track_id', mode='before')
+    @classmethod
+    def normalize_track_id(cls, value):
+        if isinstance(value, int):
+            return str(value)
+        return value
+
+    @field_validator('event_id', 'batch_id', 'camera_id', 'track_id', 'line_id')
     @classmethod
     def identifiers(cls, value):
         if value is not None and (not value.strip() or value != value.strip()):
@@ -43,4 +53,6 @@ class Event(BaseModel):
             raise ValueError('detections require 0; line crossings require 1')
         if self.event_type == 'line_crossing' and not self.track_id:
             raise ValueError('line crossing requires track_id')
+        if self.vehicle_subtype is not None and self.object_type != 'vehicle':
+            raise ValueError('vehicle_subtype requires object_type="vehicle"')
         return self

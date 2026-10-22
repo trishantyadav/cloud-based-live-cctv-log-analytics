@@ -25,6 +25,12 @@ CREATE TABLE IF NOT EXISTS events (
  CHECK ((payload::jsonb->>'confidence')::numeric BETWEEN 0 AND 1),
  CHECK ((payload::jsonb->>'synthetic')::boolean=(source='synthetic')),
  CHECK (payload::jsonb->>'object_type' IN ('vehicle','pedestrian','bicycle','other')),
+ CHECK (payload::jsonb->>'vehicle_subtype' IS NULL
+     OR payload::jsonb->>'vehicle_subtype' IN ('car','truck','bus','motorcycle')),
+ CHECK (payload::jsonb->>'direction' IS NULL
+     OR payload::jsonb->>'direction' IN ('positive','negative')),
+ CHECK (payload::jsonb->>'line_id' IS NULL
+     OR length(payload::jsonb->>'line_id')>0),
  CHECK ((payload::jsonb->>'event_type'='detection' AND (payload::jsonb->>'crossing_count')::integer=0)
      OR (payload::jsonb->>'event_type'='line_crossing' AND (payload::jsonb->>'crossing_count')::integer=1
          AND length(payload::jsonb->>'track_id')>0))
