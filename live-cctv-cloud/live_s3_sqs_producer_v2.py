@@ -12,7 +12,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 # ---------- AWS CONFIGURATION ----------
 REGION = os.getenv("AWS_REGION", "ap-south-1")
-BUCKET = os.getenv("S3_BUCKET_NAME", "generalized-etl-engine-2026-0001")
+BUCKET = os.getenv("S3_BUCKET_NAME") or os.getenv("CCTV_S3_BUCKET", "generalized-etl-engine-2026-0001")
 
 S3_PREFIX = os.getenv(
     "CCTV_S3_PREFIX",
@@ -79,7 +79,7 @@ def atomic_write_json(path, data):
 def load_checkpoint():
     if not STATE_FILE.exists():
         # Start at the end so historical events aren't replayed.
-        offset = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
+        offset = 0 if os.getenv("CCTV_START_FROM_BEGINNING", "0") in {"1", "true", "True"} else (LOG_FILE.stat().st_size if LOG_FILE.exists() else 0)
         atomic_write_json(STATE_FILE, {"offset": offset})
         print(f"Initialized checkpoint at byte {offset}.", flush=True)
         print("Existing historical events will not be replayed.", flush=True)

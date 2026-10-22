@@ -60,13 +60,18 @@ def main():
         st.json(runtime.status())
 
         st.subheader('Vehicle Traffic & Directional Analytics')
-        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
+        col_ctrl1, col_ctrl2, col_ctrl3, col_ctrl4 = st.columns([2, 2, 2, 1])
         with col_ctrl1:
             cam_filter = st.text_input('Camera filter (e.g. CAM_01)', '', key='analytics_cam')
         with col_ctrl2:
             src_filter = st.selectbox('Data source', ['all', 'live', 'synthetic'], key='analytics_src')
         with col_ctrl3:
             time_filter = st.checkbox('Filter by UTC time window', value=False, key='analytics_time_enable')
+        with col_ctrl4:
+            st.write('')
+            st.write('')
+            if st.button('🔄 Refresh'):
+                st.rerun()
 
         start_utc, end_utc = None, None
         if time_filter:
